@@ -1,0 +1,145 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [pgvector(map: "vector"), pg_trgm, unaccent]
+}
+
+// ============================================================
+// USUÁRIOS INTERNOS (apenas 2 funcionários)
+// ============================================================
+model AppUser {
+  id           String        @id @default(uuid())
+  email        String        @unique
+  phoneE164    String        @unique // whitelist WhatsApp
+  name         String
+  passwordHash String
+  totpSecret   String?
+  isActive     Boolean       @default(true)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  queries      QueryLog[]
+  sessions     UserSession[]
+}
+
+model UserSession {
+  id           String    @id @default(uuid())
+  userId       String
+  user         AppUser   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  refreshToken String    @unique
+  expiresAt    DateTime
+  revokedAt    DateTime?
+  userAgent    String?
+  ipAddress    String?
+  createdAt    DateTime  @default(now())
+
+  @@index([userId])
+}
+
+// ============================================================
+// ESTRUTURA DO DRIVE (332 clientes)
+// ============================================================
+model Cliente {
+  id            String      @id @default(uuid())
+  driveFolderId String      @unique
+  nomeEmpresa   String
+  cnpj          String?     // preenchido via IA quando descoberto
+  isActive      Boolean     @default(true)
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  files         DriveFile[]
+  queries       QueryLog[]
+
+  @@index([nomeEmpresa])
+}
+
+model DriveFile {
+  id           String      @id @default(uuid())
+  driveFileId  String      @unique
+  fileName     String
+  mimeType     String
+  sizeBytes    BigInt
+  modifiedTime DateTime
+  webViewLink  String?     // link público pro Drive
+  clienteId    String
+  cliente      Cliente     @relation(fields: [clienteId], references: [id], onDelete: Cascade)
+  indexStatus  IndexStatus @default(PENDING)
+  isScanned    Boolean?
+  errorMessage String?
+  contentHash  String?     // sha256 para detectar mudança real
+  pageCount    Int?
+  indexedAt    DateTime?
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+  chunks       DocChunk[]
+
+  @@index([clienteId, indexStatus])
+  @@index([indexStatus, createdAt])
+}
+
+model DocChunk {
+  id          String    @id @default(uuid())
+  driveFileId String
+  driveFile   DriveFile @relation(fields: [driveFileId], references: [id], onDelete: Cascade)
+  clienteId   String    // denormalizado pra acelerar filtro
+  content     String    @db.Text
+  // embedding 768 dims (text-embedding-004)
+  // Prisma não tem suporte nativo a vector ainda -> migration manual
+  pageNumber  Int?
+  chunkIndex  Int
+  createdAt   DateTime  @default(now())
+
+  @@index([clienteId])
+  @@index([driveFileId])
+}
+
+// ============================================================
+// AUDITORIA / LOGS
+// ============================================================
+model QueryLog {
+  id           String       @id @default(uuid())
+  userId       String
+  user         AppUser      @relation(fields: [userId], references: [id])
+  clienteId    String?
+  cliente      Cliente?     @relation(fields: [clienteId], references: [id])
+  question     String       @db.Text
+  answer       String       @db.Text
+  sources      Json         // [{driveFileId, fileName, score, pageNumber}]
+  channel      QueryChannel
+  latencyMs    Int
+  tokensIn     Int?
+  tokensOut    Int?
+  errorMsg     String?
+  createdAt    DateTime     @default(now())
+
+  @@index([userId, createdAt])
+  @@index([clienteId, createdAt])
+}
+
+model DriveSyncState {
+  id         Int      @id @default(1) // singleton
+  pageToken  String?  // changes.list cursor
+  lastSyncAt DateTime @default(now())
+}
+
+// ============================================================
+// ENUMS
+// ============================================================
+enum IndexStatus {
+  PENDING    // recém descoberto
+  EXTRACTING // baixando + extraindo texto
+  NEEDS_OCR  // PDF escaneado, vai pro pipeline OCR
+  EMBEDDING  // criando vetores
+  INDEXED    // pronto, busca habilitada
+  FAILED     // erro -> ver errorMessage
+  SKIPPED    // tipo não suportado
+}
+
+enum QueryChannel {
+  WHATSAPP
+  DASHBOARD
+}
